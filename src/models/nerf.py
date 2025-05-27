@@ -1,25 +1,24 @@
 """
-NeRF 神經網絡模組
+NeRF 網絡模組
 
-實現核心的 Neural Radiance Fields 網絡：
-- 多層感知機 (MLP) 架構
-- 跳躍連接
-- 位置和方向分離處理
-- 量子層預留接口
+提供多種 NeRF 網絡實現：
+- 標準 NeRF 網絡
+- 分層 NeRF 網絡
+- 輕量級 NeRF 網絡
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Optional, List
+from typing import Dict, Any, List, Tuple, Optional
 from .base import BaseModel, QuantumReadyMixin
 
 
 class NeRFNetwork(BaseModel, QuantumReadyMixin):
     """
-    NeRF 神經網絡
+    標準 NeRF 網絡
     
-    核心的神經輻射場網絡，預測 3D 點的顏色和密度
+    實現原始 NeRF 論文中的網絡架構
     """
     
     def __init__(self, config: dict):
@@ -27,11 +26,17 @@ class NeRFNetwork(BaseModel, QuantumReadyMixin):
         初始化 NeRF 網絡
         
         Args:
-            config: 網絡配置字典
+            config: 配置字典，包含：
+                - pos_encode_dim: 位置編碼維度
+                - dir_encode_dim: 方向編碼維度
+                - hidden_dim: 隱藏層維度
+                - num_layers: 層數
+                - skip_connections: 跳躍連接層索引
         """
         super().__init__(config)
+        QuantumReadyMixin.__init__(self)
         
-        # 網絡參數
+        # 獲取配置
         self.pos_encode_dim = config.get('pos_encode_dim', 63)
         self.dir_encode_dim = config.get('dir_encode_dim', 27)
         self.hidden_dim = config.get('hidden_dim', 256)
@@ -44,7 +49,6 @@ class NeRFNetwork(BaseModel, QuantumReadyMixin):
         
         for i in range(1, self.num_layers):
             if i in self.skip_connections:
-                # 跳躍連接層
                 self.pos_layers.append(nn.Linear(self.hidden_dim + self.pos_encode_dim, self.hidden_dim))
             else:
                 self.pos_layers.append(nn.Linear(self.hidden_dim, self.hidden_dim))
@@ -52,36 +56,14 @@ class NeRFNetwork(BaseModel, QuantumReadyMixin):
         # 密度預測頭
         self.density_head = nn.Linear(self.hidden_dim, 1)
         
-        # 特徵提取層 (用於顏色預測)
+        # 特徵提取層
         self.feature_layer = nn.Linear(self.hidden_dim, self.hidden_dim)
         
-        # 顏色預測層 (依賴於觀看方向)
+        # 顏色預測層
         self.color_layers = nn.ModuleList([
             nn.Linear(self.hidden_dim + self.dir_encode_dim, self.hidden_dim // 2)
         ])
         self.rgb_head = nn.Linear(self.hidden_dim // 2, 3)
-        
-        # 量子層佔位符
-        self.quantum_layers = nn.ModuleList()
-        
-        # 初始化權重
-        self._initialize_weights()
-        
-        print(f"🧠 NeRF 網絡初始化:")
-        print(f"   - 位置編碼維度: {self.pos_encode_dim}")
-        print(f"   - 方向編碼維度: {self.dir_encode_dim}")
-        print(f"   - 隱藏層維度: {self.hidden_dim}")
-        print(f"   - 網絡層數: {self.num_layers}")
-        print(f"   - 跳躍連接: {self.skip_connections}")
-        print(f"   - 總參數量: {self.count_parameters():,}")
-    
-    def _initialize_weights(self):
-        """初始化網絡權重"""
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
     
     def forward(self, pos_encoded: torch.Tensor, dir_encoded: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -92,10 +74,10 @@ class NeRFNetwork(BaseModel, QuantumReadyMixin):
             dir_encoded: [batch, dir_encode_dim] 編碼後的方向
             
         Returns:
-            rgb: [batch, 3] 預測的 RGB 顏色
-            density: [batch, 1] 預測的體積密度
+            rgb: [batch, 3] 預測的顏色
+            density: [batch, 1] 預測的密度
         """
-        # 處理位置信息
+        # 處理位置
         h = pos_encoded
         for i, layer in enumerate(self.pos_layers):
             h = layer(h)
@@ -105,187 +87,222 @@ class NeRFNetwork(BaseModel, QuantumReadyMixin):
             if i in self.skip_connections:
                 h = torch.cat([h, pos_encoded], dim=-1)
         
-        # 預測密度 (與觀看方向無關)
+        # 預測密度
         density = F.relu(self.density_head(h))
         
-        # 提取特徵用於顏色預測
+        # 提取特徵
         features = self.feature_layer(h)
         
-        # 結合特徵和觀看方向
+        # 結合特徵和方向
         color_input = torch.cat([features, dir_encoded], dim=-1)
         
-        # 處理顏色預測
+        # 處理顏色
         for layer in self.color_layers:
             color_input = F.relu(layer(color_input))
         
-        # 預測 RGB 顏色
+        # 預測 RGB
         rgb = torch.sigmoid(self.rgb_head(color_input))
         
         return rgb, density
     
     def quantum_forward(self, pos_encoded: torch.Tensor, dir_encoded: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        量子增強前向傳播 (佔位符)
+        量子增強的前向傳播
         
         Args:
             pos_encoded: [batch, pos_encode_dim] 編碼後的位置
             dir_encoded: [batch, dir_encode_dim] 編碼後的方向
             
         Returns:
-            rgb: [batch, 3] 預測的 RGB 顏色
-            density: [batch, 1] 預測的體積密度
+            rgb: [batch, 3] 預測的顏色
+            density: [batch, 1] 預測的密度
         """
-        if self.is_quantum_enabled() and len(self.quantum_layers) > 0:
-            # TODO: 實現量子層處理
-            # 可能的量子增強：
-            # 1. 量子神經網絡層
-            # 2. 量子注意力機制
-            # 3. 量子糾纏特徵處理
-            pass
+        if not self.use_quantum:
+            return self.forward(pos_encoded, dir_encoded)
         
-        # 回退到經典處理
+        # 使用量子層處理位置和方向
+        pos_encoded = super().quantum_forward(pos_encoded)
+        dir_encoded = super().quantum_forward(dir_encoded)
+        
+        # 繼續標準前向傳播
         return self.forward(pos_encoded, dir_encoded)
-    
-    def get_density(self, pos_encoded: torch.Tensor) -> torch.Tensor:
-        """
-        僅預測密度 (用於快速採樣)
-        
-        Args:
-            pos_encoded: [batch, pos_encode_dim] 編碼後的位置
-            
-        Returns:
-            density: [batch, 1] 預測的體積密度
-        """
-        h = pos_encoded
-        for i, layer in enumerate(self.pos_layers):
-            h = layer(h)
-            h = F.relu(h)
-            
-            if i in self.skip_connections:
-                h = torch.cat([h, pos_encoded], dim=-1)
-        
-        density = F.relu(self.density_head(h))
-        return density
-    
-    def get_features(self, pos_encoded: torch.Tensor) -> torch.Tensor:
-        """
-        提取位置特徵 (用於顏色預測)
-        
-        Args:
-            pos_encoded: [batch, pos_encode_dim] 編碼後的位置
-            
-        Returns:
-            features: [batch, hidden_dim] 位置特徵
-        """
-        h = pos_encoded
-        for i, layer in enumerate(self.pos_layers):
-            h = layer(h)
-            h = F.relu(h)
-            
-            if i in self.skip_connections:
-                h = torch.cat([h, pos_encoded], dim=-1)
-        
-        features = self.feature_layer(h)
-        return features
 
 
-class HierarchicalNeRF(BaseModel):
+class HierarchicalNeRF(BaseModel, QuantumReadyMixin):
     """
     分層 NeRF 網絡
     
-    包含粗糙和精細兩個網絡，用於分層體積採樣
+    實現粗細兩階段採樣的 NeRF 網絡
     """
     
     def __init__(self, config: dict):
         """
-        初始化分層 NeRF
+        初始化分層 NeRF 網絡
         
         Args:
-            config: 網絡配置字典
+            config: 配置字典，包含：
+                - pos_encode_dim: 位置編碼維度
+                - dir_encode_dim: 方向編碼維度
+                - hidden_dim: 隱藏層維度
+                - num_layers: 層數
+                - skip_connections: 跳躍連接層索引
         """
         super().__init__(config)
+        QuantumReadyMixin.__init__(self)
         
-        # 粗糙網絡 (較小)
-        coarse_config = config.copy()
-        coarse_config['hidden_dim'] = config.get('coarse_hidden_dim', 128)
-        coarse_config['num_layers'] = config.get('coarse_num_layers', 6)
-        self.coarse_network = NeRFNetwork(coarse_config)
-        
-        # 精細網絡 (較大)
-        fine_config = config.copy()
-        fine_config['hidden_dim'] = config.get('fine_hidden_dim', 256)
-        fine_config['num_layers'] = config.get('fine_num_layers', 8)
-        self.fine_network = NeRFNetwork(fine_config)
-        
-        print(f"🏗️ 分層 NeRF 初始化:")
-        print(f"   - 粗糙網絡參數: {self.coarse_network.count_parameters():,}")
-        print(f"   - 精細網絡參數: {self.fine_network.count_parameters():,}")
-        print(f"   - 總參數量: {self.count_parameters():,}")
+        # 創建粗網絡和細網絡
+        self.coarse_net = NeRFNetwork(config)
+        self.fine_net = NeRFNetwork(config)
     
-    def forward(self, pos_encoded: torch.Tensor, dir_encoded: torch.Tensor, 
-                network_type: str = 'fine') -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, pos_encoded: torch.Tensor, dir_encoded: torch.Tensor,
+                z_vals: torch.Tensor, rays_d: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         前向傳播
         
         Args:
-            pos_encoded: [batch, pos_encode_dim] 編碼後的位置
-            dir_encoded: [batch, dir_encode_dim] 編碼後的方向
-            network_type: 'coarse' 或 'fine'
+            pos_encoded: [batch, n_samples, pos_encode_dim] 編碼後的位置
+            dir_encoded: [batch, n_samples, dir_encode_dim] 編碼後的方向
+            z_vals: [batch, n_samples] 採樣點的深度值
+            rays_d: [batch, 3] 射線方向
             
         Returns:
-            rgb: [batch, 3] 預測的 RGB 顏色
-            density: [batch, 1] 預測的體積密度
+            rgb_coarse: [batch, 3] 粗網絡預測的顏色
+            rgb_fine: [batch, 3] 細網絡預測的顏色
+            weights: [batch, n_samples] 重要性權重
         """
-        if network_type == 'coarse':
-            return self.coarse_network(pos_encoded, dir_encoded)
-        else:
-            return self.fine_network(pos_encoded, dir_encoded)
+        # 粗網絡前向傳播
+        rgb_coarse, density_coarse = self.coarse_net(pos_encoded, dir_encoded)
+        
+        # 計算粗網絡的權重
+        weights = self.compute_weights(density_coarse, z_vals, rays_d)
+        
+        # 重要性採樣
+        z_vals_fine = self.importance_sampling(z_vals, weights)
+        
+        # 細網絡前向傳播
+        pos_encoded_fine = self.encode_positions(z_vals_fine, rays_d)
+        dir_encoded_fine = self.encode_directions(rays_d)
+        rgb_fine, _ = self.fine_net(pos_encoded_fine, dir_encoded_fine)
+        
+        return rgb_coarse, rgb_fine, weights
     
-    def get_coarse_prediction(self, pos_encoded: torch.Tensor, dir_encoded: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """獲取粗糙網絡預測"""
-        return self.coarse_network(pos_encoded, dir_encoded)
+    def compute_weights(self, density: torch.Tensor, z_vals: torch.Tensor,
+                       rays_d: torch.Tensor) -> torch.Tensor:
+        """
+        計算體積渲染權重
+        
+        Args:
+            density: [batch, n_samples, 1] 密度值
+            z_vals: [batch, n_samples] 深度值
+            rays_d: [batch, 3] 射線方向
+            
+        Returns:
+            weights: [batch, n_samples] 權重
+        """
+        # 計算相鄰採樣點之間的距離
+        dists = z_vals[..., 1:] - z_vals[..., :-1]
+        dists = torch.cat([dists, torch.tensor([1e10], device=dists.device).expand(dists[..., :1].shape)], -1)
+        
+        # 考慮射線方向
+        dists = dists * torch.norm(rays_d[..., None, :], dim=-1)
+        
+        # 計算 alpha 值
+        alpha = 1. - torch.exp(-density[..., 0] * dists)
+        
+        # 計算透射率
+        transmittance = torch.cumprod(
+            torch.cat([torch.ones((alpha.shape[0], 1), device=alpha.device), 1. - alpha + 1e-10], -1), -1
+        )[:, :-1]
+        
+        # 計算權重
+        weights = alpha * transmittance
+        
+        return weights
     
-    def get_fine_prediction(self, pos_encoded: torch.Tensor, dir_encoded: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """獲取精細網絡預測"""
-        return self.fine_network(pos_encoded, dir_encoded)
+    def importance_sampling(self, z_vals: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+        """
+        重要性採樣
+        
+        Args:
+            z_vals: [batch, n_samples] 原始深度值
+            weights: [batch, n_samples] 權重
+            
+        Returns:
+            z_vals_fine: [batch, n_samples] 新的深度值
+        """
+        # 計算累積分布函數
+        cdf = torch.cumsum(weights, dim=-1)
+        cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], -1)
+        
+        # 均勻採樣
+        u = torch.linspace(0., 1., steps=z_vals.shape[-1], device=z_vals.device)
+        u = u.expand(list(z_vals.shape[:-1]) + [z_vals.shape[-1]])
+        
+        # 反轉 CDF 得到新的採樣點
+        inds = torch.searchsorted(cdf, u, right=True)
+        below = torch.max(torch.zeros_like(inds-1), inds-1)
+        above = torch.min((cdf.shape[-1]-1) * torch.ones_like(inds), inds)
+        inds_g = torch.stack([below, above], -1)
+        
+        # 線性插值
+        cdf_g = torch.gather(cdf, -1, inds_g)
+        z_vals_g = torch.gather(z_vals, -1, inds_g)
+        
+        denom = (cdf_g[..., 1] - cdf_g[..., 0])
+        denom = torch.where(denom < 1e-5, torch.ones_like(denom), denom)
+        t = (u - cdf_g[..., 0]) / denom
+        z_vals_fine = z_vals_g[..., 0] + t * (z_vals_g[..., 1] - z_vals_g[..., 0])
+        
+        return z_vals_fine
 
 
-class CompactNeRF(BaseModel):
+class CompactNeRF(BaseModel, QuantumReadyMixin):
     """
-    緊湊型 NeRF 網絡
+    輕量級 NeRF 網絡
     
-    針對移動設備或快速推理優化的輕量級版本
+    實現一個更小更快的 NeRF 網絡
     """
     
     def __init__(self, config: dict):
         """
-        初始化緊湊型 NeRF
+        初始化輕量級 NeRF 網絡
         
         Args:
-            config: 網絡配置字典
+            config: 配置字典，包含：
+                - pos_encode_dim: 位置編碼維度
+                - dir_encode_dim: 方向編碼維度
+                - hidden_dim: 隱藏層維度
+                - num_layers: 層數
         """
         super().__init__(config)
+        QuantumReadyMixin.__init__(self)
         
-        self.pos_encode_dim = config.get('pos_encode_dim', 39)  # 較少的編碼維度
-        self.dir_encode_dim = config.get('dir_encode_dim', 15)
-        self.hidden_dim = config.get('hidden_dim', 64)  # 較小的隱藏層
-        self.num_layers = config.get('num_layers', 4)   # 較少的層數
+        # 獲取配置
+        self.pos_encode_dim = config.get('pos_encode_dim', 63)
+        self.dir_encode_dim = config.get('dir_encode_dim', 27)
+        self.hidden_dim = config.get('hidden_dim', 128)
+        self.num_layers = config.get('num_layers', 4)
         
-        # 共享主幹網絡
-        self.backbone = nn.ModuleList()
-        self.backbone.append(nn.Linear(self.pos_encode_dim, self.hidden_dim))
+        # 共享特徵提取層
+        self.feature_net = nn.Sequential(
+            nn.Linear(self.pos_encode_dim, self.hidden_dim),
+            nn.ReLU(),
+            *[nn.Sequential(
+                nn.Linear(self.hidden_dim, self.hidden_dim),
+                nn.ReLU()
+            ) for _ in range(self.num_layers-2)],
+            nn.Linear(self.hidden_dim, self.hidden_dim)
+        )
         
-        for i in range(1, self.num_layers):
-            self.backbone.append(nn.Linear(self.hidden_dim, self.hidden_dim))
-        
-        # 密度和顏色頭
+        # 密度預測頭
         self.density_head = nn.Linear(self.hidden_dim, 1)
-        self.color_head = nn.Linear(self.hidden_dim + self.dir_encode_dim, 3)
         
-        print(f"📱 緊湊型 NeRF 初始化:")
-        print(f"   - 隱藏層維度: {self.hidden_dim}")
-        print(f"   - 網絡層數: {self.num_layers}")
-        print(f"   - 總參數量: {self.count_parameters():,}")
+        # 顏色預測頭
+        self.color_head = nn.Sequential(
+            nn.Linear(self.hidden_dim + self.dir_encode_dim, self.hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(self.hidden_dim // 2, 3)
+        )
     
     def forward(self, pos_encoded: torch.Tensor, dir_encoded: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -296,22 +313,42 @@ class CompactNeRF(BaseModel):
             dir_encoded: [batch, dir_encode_dim] 編碼後的方向
             
         Returns:
-            rgb: [batch, 3] 預測的 RGB 顏色
-            density: [batch, 1] 預測的體積密度
+            rgb: [batch, 3] 預測的顏色
+            density: [batch, 1] 預測的密度
         """
-        # 主幹網絡處理
-        h = pos_encoded
-        for layer in self.backbone:
-            h = F.relu(layer(h))
+        # 提取特徵
+        features = self.feature_net(pos_encoded)
         
         # 預測密度
-        density = F.relu(self.density_head(h))
+        density = F.relu(self.density_head(features))
         
-        # 預測顏色 (結合方向信息)
-        color_input = torch.cat([h, dir_encoded], dim=-1)
+        # 預測顏色
+        color_input = torch.cat([features, dir_encoded], dim=-1)
         rgb = torch.sigmoid(self.color_head(color_input))
         
         return rgb, density
+    
+    def quantum_forward(self, pos_encoded: torch.Tensor, dir_encoded: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        量子增強的前向傳播
+        
+        Args:
+            pos_encoded: [batch, pos_encode_dim] 編碼後的位置
+            dir_encoded: [batch, dir_encode_dim] 編碼後的方向
+            
+        Returns:
+            rgb: [batch, 3] 預測的顏色
+            density: [batch, 1] 預測的密度
+        """
+        if not self.use_quantum:
+            return self.forward(pos_encoded, dir_encoded)
+        
+        # 使用量子層處理位置和方向
+        pos_encoded = super().quantum_forward(pos_encoded)
+        dir_encoded = super().quantum_forward(dir_encoded)
+        
+        # 繼續標準前向傳播
+        return self.forward(pos_encoded, dir_encoded)
 
 
 def create_nerf_network(config: dict) -> BaseModel:
