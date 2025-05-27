@@ -20,7 +20,11 @@ import os
 import json
 from typing import Tuple, Optional, Dict, Any
 import imageio
+from PIL import Image
 
+# cuda check
+print(f"CUDA available: {torch.cuda.is_available()}")
+print(f"CUDA device: {torch.cuda.get_device_name(torch.cuda.current_device())}")
 
 class PositionalEncoder:
     """
@@ -151,8 +155,9 @@ class NeRFNetwork(nn.Module):
             h = layer(h)
             h = F.relu(h)
             
-            # Skip connections
-            if i in self.skip_connections:
+            # Apply skip connections after processing the layer
+            # Skip connections concatenate the original input to the current features
+            if (i + 1) in self.skip_connections and (i + 1) < len(self.pos_layers):
                 h = torch.cat([h, pos_encoded], dim=-1)
         
         # Predict density (view-independent)
@@ -324,6 +329,57 @@ class NeRFTrainer:
         self.quantum_optimizer = None
         self.quantum_loss = None
     
+    def validate(self, val_data: Dict[str, torch.Tensor], 
+                num_val_images: int = 5) -> Tuple[float, float]:
+        """
+        Validate the model on validation data
+        
+        Args:
+            val_data: validation dataset
+            num_val_images: number of validation images to evaluate
+            
+        Returns:
+            average_loss: average validation loss
+            average_psnr: average validation PSNR
+        """
+        self.model.eval()
+        
+        total_loss = 0.0
+        total_psnr = 0.0
+        num_evaluated = 0
+        
+        with torch.no_grad():
+            # Randomly sample validation images
+            val_indices = torch.randperm(len(val_data['images']))[:num_val_images]
+            
+            for idx in val_indices:
+                target_img = val_data['images'][idx]
+                pose = val_data['poses'][idx]
+                
+                # Create rays for this image
+                rays_o, rays_d = create_rays(
+                    val_data['height'], val_data['width'], val_data['focal'], pose
+                )
+                
+                # Render the image
+                rendered_img = self.render_image(rays_o, rays_d, chunk_size=512)
+                rendered_img = rendered_img.reshape(val_data['height'], val_data['width'], 3)
+                
+                # Calculate loss
+                loss = self.mse_loss(rendered_img, target_img)
+                psnr = -10. * torch.log10(loss)
+                
+                total_loss += loss.item()
+                total_psnr += psnr.item()
+                num_evaluated += 1
+        
+        self.model.train()
+        
+        avg_loss = total_loss / num_evaluated
+        avg_psnr = total_psnr / num_evaluated
+        
+        return avg_loss, avg_psnr
+
     def train_step(self, rays_o: torch.Tensor, rays_d: torch.Tensor, 
                   target_rgb: torch.Tensor) -> Tuple[float, float]:
         """
@@ -481,6 +537,111 @@ def create_rays(height: int, width: int, focal: float, pose: torch.Tensor) -> Tu
     return rays_o.reshape(-1, 3), rays_d.reshape(-1, 3)
 
 
+def load_nerf_dataset(data_dir: str, split: str = 'train', 
+                     downsample_factor: int = 1, white_bkgd: bool = True) -> Dict[str, torch.Tensor]:
+    """
+    Load NeRF dataset from the standard format
+    
+    Args:
+        data_dir: path to the dataset directory
+        split: 'train', 'val', or 'test'
+        downsample_factor: factor to downsample images (1 = no downsampling)
+        white_bkgd: whether to use white background for transparent images
+        
+    Returns:
+        Dictionary containing images, poses, intrinsics, and metadata
+    """
+    # Load transforms file
+    transforms_file = os.path.join(data_dir, f'transforms_{split}.json')
+    
+    if not os.path.exists(transforms_file):
+        raise FileNotFoundError(f"Transforms file not found: {transforms_file}")
+    
+    with open(transforms_file, 'r') as f:
+        meta = json.load(f)
+    
+    # Extract camera parameters
+    camera_angle_x = meta['camera_angle_x']
+    
+    # Load images and poses
+    images = []
+    poses = []
+    
+    print(f"Loading {split} dataset from {data_dir}...")
+    
+    for frame in tqdm(meta['frames'], desc=f"Loading {split} images"):
+        # Construct image path
+        image_path = frame['file_path']
+        if not image_path.endswith('.png'):
+            image_path += '.png'
+        
+        # Handle relative paths
+        if image_path.startswith('./'):
+            image_path = image_path[2:]
+        
+        full_image_path = os.path.join(data_dir, image_path)
+        
+        if not os.path.exists(full_image_path):
+            print(f"Warning: Image not found: {full_image_path}")
+            continue
+        
+        # Load image
+        img = Image.open(full_image_path)
+        img = np.array(img)
+        
+        # Handle RGBA images
+        if img.shape[-1] == 4:
+            # Extract alpha channel
+            alpha = img[..., 3:4] / 255.0
+            rgb = img[..., :3] / 255.0
+            
+            if white_bkgd:
+                # Composite with white background
+                img = rgb * alpha + (1.0 - alpha)
+            else:
+                # Keep alpha channel
+                img = np.concatenate([rgb, alpha], axis=-1)
+        else:
+            # RGB image
+            img = img[..., :3] / 255.0
+        
+        # Downsample if needed
+        if downsample_factor > 1:
+            h, w = img.shape[:2]
+            new_h, new_w = h // downsample_factor, w // downsample_factor
+            img = np.array(Image.fromarray((img * 255).astype(np.uint8)).resize((new_w, new_h)))
+            img = img.astype(np.float32) / 255.0
+        
+        images.append(img)
+        
+        # Extract pose matrix
+        pose = np.array(frame['transform_matrix'])
+        poses.append(pose)
+    
+    # Convert to tensors
+    images = torch.from_numpy(np.stack(images)).float()
+    poses = torch.from_numpy(np.stack(poses)).float()
+    
+    # Calculate focal length from camera angle
+    height, width = images.shape[1:3]
+    focal = 0.5 * width / np.tan(0.5 * camera_angle_x)
+    
+    # Adjust focal length for downsampling
+    focal = focal / downsample_factor
+    
+    print(f"Loaded {len(images)} images of size {height}x{width}")
+    print(f"Focal length: {focal:.2f}")
+    
+    return {
+        'images': images,
+        'poses': poses,
+        'height': height,
+        'width': width,
+        'focal': focal,
+        'camera_angle_x': camera_angle_x
+    }
+
+
 def generate_synthetic_data(n_images: int = 100) -> Dict[str, torch.Tensor]:
     """
     Generate synthetic training data for demonstration
@@ -505,8 +666,8 @@ def generate_synthetic_data(n_images: int = 100) -> Dict[str, torch.Tensor]:
         
         # Create camera-to-world matrix
         z_axis = F.normalize(cam_pos - look_at, dim=0)
-        x_axis = F.normalize(torch.cross(up, z_axis), dim=0)
-        y_axis = torch.cross(z_axis, x_axis)
+        x_axis = F.normalize(torch.cross(up, z_axis, dim=0), dim=0)
+        y_axis = torch.cross(z_axis, x_axis, dim=0)
         
         pose = torch.stack([x_axis, y_axis, z_axis, cam_pos], dim=1)
         poses.append(pose)
@@ -538,14 +699,38 @@ def main():
         'pos_encode_freqs': 10,
         'dir_encode_freqs': 4,
         'log_every': 100,
-        'save_every': 1000
+        'save_every': 1000,
+        'data_dir': 'data/synthetic',  # Path to the real dataset
+        'downsample_factor': 4,  # Downsample images for faster training
+        'use_real_data': True  # Switch between real and synthetic data
     }
     
     print("🚀 Starting NeRF Training (Quantum-Ready Architecture)")
     print(f"Device: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
     
-    # Generate or load data
-    data = generate_synthetic_data(n_images=50)
+    # Load data
+    if config['use_real_data']:
+        print("📁 Loading real NeRF dataset...")
+        data = load_nerf_dataset(
+            data_dir=config['data_dir'],
+            split='train',
+            downsample_factor=config['downsample_factor'],
+            white_bkgd=True
+        )
+        
+        # Also load validation data for evaluation
+        val_data = load_nerf_dataset(
+            data_dir=config['data_dir'],
+            split='val',
+            downsample_factor=config['downsample_factor'],
+            white_bkgd=True
+        )
+        print(f"📊 Training images: {len(data['images'])}")
+        print(f"📊 Validation images: {len(val_data['images'])}")
+    else:
+        print("🎲 Generating synthetic data...")
+        data = generate_synthetic_data(n_images=50)
+        val_data = None
     
     # Initialize encoders
     pos_encoder = PositionalEncoder(
@@ -574,6 +759,8 @@ def main():
     print(f"Directional encoding dim: {dir_encoder.out_dim}")
     
     # Training loop
+    best_val_psnr = 0.0
+    
     for epoch in tqdm(range(config['num_epochs']), desc="Training"):
         # Sample random image
         img_idx = torch.randint(0, data['images'].shape[0], (1,)).item()
@@ -590,15 +777,36 @@ def main():
         batch_rays_o = rays_o[ray_indices]
         batch_rays_d = rays_d[ray_indices]
         
-        # Get target colors
+        # Get target colors (ensure RGB format)
+        if target_img.shape[-1] == 4:
+            target_img = target_img[..., :3]  # Remove alpha channel if present
         target_rgb = target_img.reshape(-1, 3)[ray_indices]
         
         # Training step
         loss, psnr = trainer.train_step(batch_rays_o, batch_rays_d, target_rgb)
         
-        # Logging
+        # Logging and validation
         if epoch % config['log_every'] == 0:
-            print(f"Epoch {epoch:5d}: Loss = {loss:.6f}, PSNR = {psnr:.2f}")
+            log_msg = f"Epoch {epoch:5d}: Train Loss = {loss:.6f}, Train PSNR = {psnr:.2f}"
+            
+            # Run validation if we have validation data
+            if val_data is not None and epoch % (config['log_every'] * 2) == 0:
+                val_loss, val_psnr = trainer.validate(val_data, num_val_images=3)
+                log_msg += f", Val Loss = {val_loss:.6f}, Val PSNR = {val_psnr:.2f}"
+                
+                # Save best model
+                if val_psnr > best_val_psnr:
+                    best_val_psnr = val_psnr
+                    torch.save({
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': trainer.optimizer.state_dict(),
+                        'epoch': epoch,
+                        'config': config,
+                        'val_psnr': val_psnr
+                    }, 'nerf_best_model.pth')
+                    log_msg += " 🌟 (Best!)"
+            
+            print(log_msg)
         
         # Save checkpoint
         if epoch % config['save_every'] == 0 and epoch > 0:
@@ -608,25 +816,51 @@ def main():
                 'epoch': epoch,
                 'config': config
             }, f'nerf_checkpoint_{epoch}.pth')
-            print(f"Saved checkpoint at epoch {epoch}")
+            print(f"💾 Saved checkpoint at epoch {epoch}")
     
     print("✅ Training completed!")
+    print(f"🏆 Best validation PSNR: {best_val_psnr:.2f}")
     
-    # Render a test image
-    print("🎨 Rendering test image...")
-    test_pose = data['poses'][0]  # Use first pose for testing
-    rays_o, rays_d = create_rays(data['height'], data['width'], data['focal'], test_pose)
+    # Render test images
+    print("🎨 Rendering test images...")
     
-    rendered_img = trainer.render_image(rays_o, rays_d)
-    rendered_img = rendered_img.reshape(data['height'], data['width'], 3)
+    # Use validation data for testing if available, otherwise use training data
+    test_data = val_data if val_data is not None else data
     
-    # Save rendered image
-    imageio.imwrite('rendered_image.png', (rendered_img * 255).numpy().astype(np.uint8))
-    print("💾 Saved rendered image as 'rendered_image.png'")
+    # Render a few test images
+    num_test_renders = min(3, len(test_data['images']))
+    for i in range(num_test_renders):
+        test_pose = test_data['poses'][i]
+        rays_o, rays_d = create_rays(test_data['height'], test_data['width'], test_data['focal'], test_pose)
+        
+        rendered_img = trainer.render_image(rays_o, rays_d)
+        rendered_img = rendered_img.reshape(test_data['height'], test_data['width'], 3)
+        
+        # Save rendered image
+        rendered_filename = f'rendered_image_{i:03d}.png'
+        imageio.imwrite(rendered_filename, (rendered_img * 255).numpy().astype(np.uint8))
+        
+        # Also save ground truth for comparison
+        if i < len(test_data['images']):
+            gt_img = test_data['images'][i]
+            gt_filename = f'ground_truth_{i:03d}.png'
+            imageio.imwrite(gt_filename, (gt_img * 255).numpy().astype(np.uint8))
+        
+        print(f"💾 Saved rendered image: {rendered_filename}")
     
     # Save final model
     torch.save(model.state_dict(), 'nerf_final_model.pth')
     print("💾 Saved final model as 'nerf_final_model.pth'")
+    
+    # Print summary
+    print("\n📊 Training Summary:")
+    print(f"   • Dataset: {'Real NeRF data' if config['use_real_data'] else 'Synthetic data'}")
+    print(f"   • Training images: {len(data['images'])}")
+    if val_data is not None:
+        print(f"   • Validation images: {len(val_data['images'])}")
+    print(f"   • Image resolution: {data['height']}x{data['width']}")
+    print(f"   • Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    print(f"   • Best validation PSNR: {best_val_psnr:.2f} dB")
 
 
 if __name__ == "__main__":

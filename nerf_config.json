@@ -1,0 +1,15 @@
+{
+  "name": "Basic NeRF",
+  "description": "Simple configuration for learning",
+  "learning_rate": 0.0005,
+  "batch_size": 512,
+  "num_epochs": 5000,
+  "pos_encode_freqs": 6,
+  "dir_encode_freqs": 4,
+  "hidden_dim": 128,
+  "num_layers": 6,
+  "n_samples": 32,
+  "n_importance": 64,
+  "log_every": 50,
+  "save_every": 500
+}
