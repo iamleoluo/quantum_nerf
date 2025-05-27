@@ -1,0 +1,122 @@
+# Quantum NeRF 基礎配置文件
+# 適合初學者和快速測試
+
+# 實驗設置
+experiment:
+  name: "basic_nerf_experiment"
+  description: "基礎 NeRF 訓練實驗"
+  output_dir: "outputs"
+  seed: 42
+
+# 模型配置
+model:
+  # NeRF 網絡參數
+  hidden_dim: 128
+  num_layers: 6
+  skip_connections: [3]
+  
+  # 位置編碼參數
+  pos_encoding:
+    input_dims: 3
+    max_freq_log2: 6
+    num_freqs: 6
+    include_input: true
+  
+  # 方向編碼參數  
+  dir_encoding:
+    input_dims: 3
+    max_freq_log2: 4
+    num_freqs: 4
+    include_input: true
+
+# 渲染配置
+rendering:
+  # 採樣參數
+  near: 2.0
+  far: 6.0
+  n_samples: 32
+  n_importance: 64
+  
+  # 渲染設置
+  white_background: true
+  chunk_size: 1024  # 批次處理大小，避免記憶體溢出
+
+# 訓練配置
+training:
+  # 基本參數
+  num_epochs: 5000
+  batch_size: 512
+  learning_rate: 5e-4
+  
+  # 學習率調度
+  lr_scheduler:
+    type: "exponential"
+    gamma: 0.1
+    step_size: 2000
+  
+  # 正則化
+  weight_decay: 0.0
+  
+  # 日誌和保存
+  log_every: 50
+  save_every: 500
+  validate_every: 200
+
+# 數據配置
+data:
+  # 數據路徑
+  data_dir: "data/synthetic"
+  scene_name: "lego"
+  
+  # 圖像設置
+  image_height: 64
+  image_width: 64
+  focal_length: 30.0
+  
+  # 數據分割
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
+
+# 量子配置（未來使用）
+quantum:
+  enabled: false
+  backend: "qiskit_simulator"
+  
+  # 量子編碼
+  quantum_encoding:
+    enabled: false
+    n_qubits: 6
+    
+  # 量子層
+  quantum_layers:
+    enabled: false
+    n_qubits: 8
+    n_layers: 3
+
+# 可視化配置
+visualization:
+  # 訓練過程可視化
+  plot_loss: true
+  plot_psnr: true
+  save_images: true
+  
+  # 渲染結果
+  render_video: false
+  video_fps: 30
+  
+# 硬體配置
+hardware:
+  # GPU 設置
+  use_cuda: true
+  gpu_id: 0
+  
+  # 多處理
+  num_workers: 4
+  pin_memory: true
+
+# 調試配置
+debug:
+  enabled: false
+  profile_memory: false
+  check_gradients: false 
