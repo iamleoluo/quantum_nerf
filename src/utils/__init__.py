@@ -9,7 +9,7 @@
 """
 
 from .config import ConfigManager
-from .data_utils import DataLoader, create_rays
+from .data_utils import NeRFDataLoader, create_rays
 from .visualization import plot_training_curves, render_video
 from .math_utils import safe_normalize, compute_psnr
 

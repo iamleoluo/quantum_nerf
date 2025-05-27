@@ -56,7 +56,7 @@ def create_sample_data():
     """創建示例數據"""
     print("\n📊 創建示例數據...")
     
-    data_dir = Path("data/synthetic")
+    data_dir = Path("data/synthetic/lego")
     data_dir.mkdir(parents=True, exist_ok=True)
     
     # 創建簡單的配置文件
